@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from loader import DataLoader
 from scheduler import Scheduler
@@ -21,15 +20,26 @@ from output import write_outputs
 
 app = FastAPI(title="PS1 Railway Track Scheduler", version="1.0.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 BASE_DIR = Path(__file__).parent.parent
 DEFAULT_DATA = BASE_DIR.parent / "NebulaX-Hackathon-ProblemStatement" / "PS1" / "01_data"
 
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+RISK_BY_PRIORITY = {1: "HIGH", 2: "AMBER", 3: "LOW"}
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def index():
+    html_file = BASE_DIR / "templates" / "index.html"
+    return HTMLResponse(content=html_file.read_text(encoding="utf-8"))
 
 
 @app.post("/solve")
@@ -152,6 +162,79 @@ async def summary():
         "scheduled_accesses": len(assignments),
         "results": results,
     }
+
+
+@app.get("/api/dashboard")
+async def dashboard():
+    """
+    Real data for the ssl-rail-dispatch UI: per-scenario scores + a queue of
+    upcoming possessions, built from the default dataset. Fictional telemetry
+    (substation feeders, live train positions, signal aspects) has no
+    equivalent in the PS1 data model and is not produced here.
+    """
+    loader = DataLoader(str(DEFAULT_DATA))
+    params, locations, contracts, activities, buffers, sectors_ordered = loader.load()
+
+    scenarios = {}
+    possessions = []
+
+    for sc, allow_eclo, allow_excess in [("A", False, False), ("B", True, True), ("C", True, True)]:
+        scheduler = Scheduler(
+            params=params,
+            locations=locations,
+            contracts=contracts,
+            activities=activities,
+            buffers=buffers,
+            sectors_ordered=sectors_ordered,
+            scenario=sc,
+            allow_eclo=allow_eclo,
+            allow_excess=allow_excess,
+        )
+        assignments, occupancies = scheduler.schedule()
+        results = compute_results(params, contracts, activities, assignments, sc)
+        score = compute_score(results, assignments, sc, activities)
+
+        overrun_days_total = sum(r["overrun_days"] for r in results)
+        contracts_overrunning = sum(1 for r in results if r["overrun_days"] > 0)
+        eclo_nights_total = sum(1 for a in assignments if a.eclo)
+
+        scenarios[sc] = {
+            "score": round(score, 1),
+            "overrun_days_total": overrun_days_total,
+            "contracts_overrunning": contracts_overrunning,
+            "eclo_nights_total": eclo_nights_total,
+            "nights_scheduled": len(assignments),
+        }
+
+        if sc == "A":
+            # Build the possessions queue from Scenario A's earliest-scheduled activities.
+            occ_by_activity_week = {}
+            for o in occupancies:
+                occ_by_activity_week.setdefault((o.activity_id, o.week), []).append(o.location_id)
+
+            earliest_by_activity = {}
+            for a in assignments:
+                key = a.activity_id
+                if key not in earliest_by_activity or a.week < earliest_by_activity[key].week:
+                    earliest_by_activity[key] = a
+
+            ordered = sorted(earliest_by_activity.values(), key=lambda a: (a.week, a.activity_id))[:8]
+            for idx, a in enumerate(ordered):
+                activity = activities[a.activity_id]
+                contract = contracts.get(activity.contract_number)
+                locs = occ_by_activity_week.get((a.activity_id, a.week), [])
+                possessions.append({
+                    "id": f"q-{a.activity_id}",
+                    "code": f"#{a.activity_id}-{activity.contract_number}",
+                    "contractor": f"{activity.contract_number} • {activity.activity_type}",
+                    "workDesc": (contract.description if contract else activity.activity_type),
+                    "timeWindow": f"Week {a.week}" + (" (ECLO)" if a.eclo else ""),
+                    "trackSector": locs[0] if locs else activity.start_location_id,
+                    "status": "ACTIVE" if idx == 0 else ("STANDBY" if idx >= len(ordered) - 2 else "QUEUED"),
+                    "riskLevel": RISK_BY_PRIORITY.get(activity.activity_priority, "LOW"),
+                })
+
+    return {"scenarios": scenarios, "possessions": possessions}
 
 
 if __name__ == "__main__":
