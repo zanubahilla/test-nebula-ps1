@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PS1 - Railway Track Access Scheduler</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+
+        header {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-bottom: 1px solid #334155;
+            padding: 1.5rem 2rem;
+            display: flex; align-items: center; gap: 1rem;
+        }
+        header h1 { font-size: 1.5rem; font-weight: 700; color: #f1f5f9; }
+        header p { font-size: 0.85rem; color: #94a3b8; }
+        .badge {
+            background: #3b82f6; color: white;
+            padding: 0.25rem 0.75rem; border-radius: 999px;
+            font-size: 0.75rem; font-weight: 600;
+        }
+
+        main { max-width: 900px; margin: 2rem auto; padding: 0 1.5rem; }
+
+        .card {
+            background: #1e293b; border: 1px solid #334155;
+            border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem;
+        }
+        .card h2 { font-size: 1rem; font-weight: 600; color: #cbd5e1; margin-bottom: 1rem; }
+
+        .scenario-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+        .scenario-btn {
+            padding: 1rem; border: 2px solid #334155; border-radius: 8px;
+            background: transparent; color: #94a3b8; cursor: pointer;
+            text-align: center; transition: all 0.2s;
+        }
+        .scenario-btn:hover { border-color: #3b82f6; color: #3b82f6; }
+        .scenario-btn.active { border-color: #3b82f6; background: #1d4ed8; color: white; }
+        .scenario-btn .title { font-size: 1.1rem; font-weight: 700; }
+        .scenario-btn .desc { font-size: 0.75rem; margin-top: 0.25rem; }
+
+        .toggle-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+        .toggle { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
+        .toggle input { width: 1rem; height: 1rem; accent-color: #3b82f6; }
+
+        .file-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+        .file-input label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.3rem; }
+        .file-input input[type="file"] {
+            width: 100%; padding: 0.5rem;
+            background: #0f172a; border: 1px solid #334155;
+            border-radius: 6px; color: #e2e8f0; font-size: 0.8rem;
+        }
+
+        .solve-btn {
+            width: 100%; padding: 1rem; font-size: 1rem; font-weight: 600;
+            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+            color: white; border: none; border-radius: 8px; cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .solve-btn:hover { opacity: 0.9; }
+        .solve-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        #status {
+            margin-top: 1rem; padding: 1rem; border-radius: 8px;
+            display: none; font-size: 0.9rem;
+        }
+        #status.loading { background: #1e3a5f; border: 1px solid #3b82f6; color: #93c5fd; }
+        #status.success { background: #14532d; border: 1px solid #22c55e; color: #86efac; }
+        #status.error { background: #450a0a; border: 1px solid #ef4444; color: #fca5a5; }
+
+        .spinner {
+            display: inline-block; width: 1rem; height: 1rem;
+            border: 2px solid #3b82f6; border-top-color: transparent;
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+            vertical-align: middle; margin-right: 0.5rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+        .stat { text-align: center; }
+        .stat .value { font-size: 1.8rem; font-weight: 700; color: #3b82f6; }
+        .stat .label { font-size: 0.75rem; color: #64748b; margin-top: 0.25rem; }
+    </style>
+</head>
+<body>
+    <header>
+        <div>
+            <h1>Railway Track Access Scheduler</h1>
+            <p>NebulaX 2026 Hackathon — Problem Statement 1</p>
+        </div>
+        <span class="badge">LTA</span>
+    </header>
+
+    <main>
+        <!-- Stats -->
+        <div class="card" id="stats-card" style="display:none;">
+            <h2>Dataset Summary</h2>
+            <div class="stats-grid" id="stats-grid"></div>
+        </div>
+
+        <!-- Scenario Selection -->
+        <div class="card">
+            <h2>Select Scenario</h2>
+            <div class="scenario-grid">
+                <button class="scenario-btn active" data-scenario="A" onclick="selectScenario(this)">
+                    <div class="title">Scenario A</div>
+                    <div class="desc">Rigid Capacity<br>Minimize overrun</div>
+                </button>
+                <button class="scenario-btn" data-scenario="B" onclick="selectScenario(this)">
+                    <div class="title">Scenario B</div>
+                    <div class="desc">Rigid Schedule<br>Minimize excess + ECLO</div>
+                </button>
+                <button class="scenario-btn" data-scenario="C" onclick="selectScenario(this)">
+                    <div class="title">Scenario C</div>
+                    <div class="desc">Balanced<br>All penalties</div>
+                </button>
+            </div>
+        </div>
+
+        <!-- Data Source -->
+        <div class="card">
+            <h2>Data Source</h2>
+            <div class="toggle-row">
+                <label class="toggle">
+                    <input type="checkbox" id="use-default" checked onchange="toggleUpload()">
+                    Use default dataset (from problem statement)
+                </label>
+            </div>
+            <div id="upload-section" style="display:none;">
+                <div class="file-grid">
+                    <div class="file-input"><label>01_LINES.csv</label><input type="file" id="f-lines" accept=".csv"></div>
+                    <div class="file-input"><label>02_STATIONS.csv</label><input type="file" id="f-stations" accept=".csv"></div>
+                    <div class="file-input"><label>03_SECTORS.csv</label><input type="file" id="f-sectors" accept=".csv"></div>
+                    <div class="file-input"><label>04_LOCATION_SUPPLY.csv</label><input type="file" id="f-supply" accept=".csv"></div>
+                    <div class="file-input"><label>05_BUFFER_LOCATION.csv</label><input type="file" id="f-buffer" accept=".csv"></div>
+                    <div class="file-input"><label>06_PARAMETERS.csv</label><input type="file" id="f-params" accept=".csv"></div>
+                    <div class="file-input"><label>07_PROJECT_DETAILS.csv</label><input type="file" id="f-projects" accept=".csv"></div>
+                    <div class="file-input"><label>08_ACTIVITY_DETAILS.csv</label><input type="file" id="f-activities" accept=".csv"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Solve -->
+        <button class="solve-btn" onclick="solve()">Run Scheduler & Download Results</button>
+        <div id="status"></div>
+    </main>
+
+    <script>
+        let selectedScenario = "A";
+
+        function selectScenario(btn) {
+            document.querySelectorAll(".scenario-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            selectedScenario = btn.dataset.scenario;
+        }
+
+        function toggleUpload() {
+            const checked = document.getElementById("use-default").checked;
+            document.getElementById("upload-section").style.display = checked ? "none" : "block";
+        }
+
+        async function loadStats() {
+            try {
+                const res = await fetch("/api/summary");
+                const data = await res.json();
+                const card = document.getElementById("stats-card");
+                const grid = document.getElementById("stats-grid");
+                grid.innerHTML = `
+                    <div class="stat"><div class="value">${data.contracts}</div><div class="label">Contracts</div></div>
+                    <div class="stat"><div class="value">${data.activities}</div><div class="label">Activities</div></div>
+                    <div class="stat"><div class="value">${data.horizon_weeks}</div><div class="label">Weeks</div></div>
+                    <div class="stat"><div class="value">${data.scheduled_accesses}</div><div class="label">Access Nights</div></div>
+                `;
+                card.style.display = "block";
+            } catch(e) { console.error(e); }
+        }
+
+        async function solve() {
+            const btn = document.querySelector(".solve-btn");
+            const status = document.getElementById("status");
+            btn.disabled = true;
+            status.className = "loading";
+            status.style.display = "block";
+            status.innerHTML = '<span class="spinner"></span> Running scheduler... this may take a few seconds.';
+
+            try {
+                const formData = new FormData();
+                formData.append("scenario", selectedScenario);
+                const useDefault = document.getElementById("use-default").checked;
+                formData.append("use_default", useDefault);
+
+                if (!useDefault) {
+                    const files = {
+                        "lines_file": "f-lines", "stations_file": "f-stations",
+                        "sectors_file": "f-sectors", "location_supply_file": "f-supply",
+                        "buffer_file": "f-buffer", "parameters_file": "f-params",
+                        "project_file": "f-projects", "activity_file": "f-activities",
+                    };
+                    for (const [field, id] of Object.entries(files)) {
+                        const input = document.getElementById(id);
+                        if (input.files[0]) formData.append(field, input.files[0]);
+                    }
+                }
+
+                const res = await fetch("/solve", { method: "POST", body: formData });
+
+                if (!res.ok) {
+                    const err = await res.text();
+                    throw new Error(err);
+                }
+
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = "ps1_results.zip"; a.click();
+                URL.revokeObjectURL(url);
+
+                status.className = "success";
+                status.innerHTML = "Scheduling complete! Your results ZIP has been downloaded.";
+                loadStats();
+            } catch(e) {
+                status.className = "error";
+                status.innerHTML = "Error: " + e.message;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        loadStats();
+    </script>
+</body>
+</html>
