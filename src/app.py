@@ -237,6 +237,99 @@ async def dashboard():
     return {"scenarios": scenarios, "possessions": possessions}
 
 
+@app.get("/api/schedule")
+async def schedule(scenario: str = "C"):
+    """
+    Full per-activity / per-location schedule detail for one scenario, built
+    from the default dataset. Backs the Schedule Calendar (per-location
+    weekly occupancy) and Kanban Board (per-contract activity duration)
+    views: every field here traces back to the scheduler's real output,
+    nothing decorative.
+    """
+    if scenario not in ("A", "B", "C"):
+        scenario = "C"
+
+    loader = DataLoader(str(DEFAULT_DATA))
+    params, locations, contracts, activities, buffers, sectors_ordered = loader.load()
+
+    allow_eclo = scenario in ("B", "C")
+    allow_excess = scenario in ("B", "C")
+    scheduler = Scheduler(
+        params=params,
+        locations=locations,
+        contracts=contracts,
+        activities=activities,
+        buffers=buffers,
+        sectors_ordered=sectors_ordered,
+        scenario=scenario,
+        allow_eclo=allow_eclo,
+        allow_excess=allow_excess,
+    )
+    assignments, occupancies = scheduler.schedule()
+
+    weeks_by_activity: dict = {}
+    eclo_weeks_by_activity: dict = {}
+    for a in assignments:
+        weeks_by_activity.setdefault(a.activity_id, set()).add(a.week)
+        if a.eclo:
+            eclo_weeks_by_activity.setdefault(a.activity_id, set()).add(a.week)
+
+    activities_out = []
+    for act in activities.values():
+        assigned_weeks = sorted(weeks_by_activity.get(act.activity_id, []))
+        activities_out.append({
+            "activity_id": act.activity_id,
+            "contract_number": act.contract_number,
+            "activity_type": act.activity_type,
+            "activity_priority": act.activity_priority,
+            "start_location_id": act.start_location_id,
+            "end_location_id": act.end_location_id,
+            "total_accesses": act.total_accesses,
+            "planned_start_week": params.date_to_week(act.planned_start_date),
+            "assigned_weeks": assigned_weeks,
+            "eclo_weeks": sorted(eclo_weeks_by_activity.get(act.activity_id, [])),
+        })
+
+    contracts_out = [
+        {
+            "contract_number": c.contract_number,
+            "description": c.description,
+            "nature_of_activity": c.nature_of_activity,
+            "contract_priority": c.contract_priority,
+            "planned_completion_date": c.planned_completion_date.isoformat(),
+        }
+        for c in contracts.values()
+    ]
+
+    locations_out = [
+        {
+            "location_id": loc.location_id,
+            "location_kind": loc.location_kind,
+            "line_code": loc.line_code,
+            "bound": loc.bound,
+            "supply_capacity": loc.supply_capacity,
+        }
+        for loc in locations.values()
+    ]
+
+    occupancy_out: dict = {}
+    for o in occupancies:
+        week_map = occupancy_out.setdefault(o.location_id, {})
+        week_map.setdefault(str(o.week), []).append({
+            "activity_id": o.activity_id,
+            "co_share_group": o.co_share_group,
+        })
+
+    return {
+        "scenario": scenario,
+        "horizon_weeks": params.horizon_weeks,
+        "activities": activities_out,
+        "contracts": contracts_out,
+        "locations": locations_out,
+        "occupancy": occupancy_out,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
