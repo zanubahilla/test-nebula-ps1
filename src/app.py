@@ -334,42 +334,72 @@ async def schedule(scenario: str = "C"):
     }
 
 
+EXTERNAL_SOLVER_OUTPUT = BASE_DIR / "external_solver_output"
+
+
 def _build_schedule_context() -> str:
     """
-    Plain-text summary of the real scheduler output across all 3 scenarios --
-    this is the ONLY source of truth handed to the chatbot. Nothing here is
-    invented; it's built the same way /api/dashboard and /api/schedule are.
+    Plain-text summary of a precomputed external solve across all 3 scenarios
+    -- this is the ONLY source of truth handed to the chatbot. The schedule
+    itself (which weeks, ECLO, scores, contract completion) comes from
+    external_solver_output/scenario_{A,B,C}/ (SCHEDULE_ACCESS.csv, RESULTS.csv,
+    report.json), a real result produced by a separate CP-SAT-based solver
+    (github.com/al-rachmansyah/Maintenance-Scheduler-Solver) against this same
+    instance. Contract/activity descriptions still come from our own loader,
+    since the external files don't carry that metadata. Nothing here is
+    invented or interpolated -- if a file is missing, that scenario is skipped
+    with a note rather than silently faked.
     """
+    import csv
+    import json as jsonlib
+
     loader = DataLoader(str(DEFAULT_DATA))
     params, locations, contracts, activities, buffers, sectors_ordered = loader.load()
 
-    lines = [f"Planning horizon: {params.horizon_weeks} weeks, starting {params.horizon_start.isoformat()}.", ""]
-
-    lines.append("CONTRACTS:")
+    lines = [
+        f"Planning horizon: {params.horizon_weeks} weeks, starting {params.horizon_start.isoformat()}.",
+        "Schedule source: external solver (CP-SAT-based), precomputed -- not regenerated live.",
+        "",
+        "CONTRACTS:",
+    ]
     for c in contracts.values():
         lines.append(
             f"- {c.contract_number}: {c.description} | priority P{c.contract_priority} | "
             f"{c.nature_of_activity} | planned completion {c.planned_completion_date.isoformat()}"
         )
 
-    for sc, allow_eclo, allow_excess in [("A", False, False), ("B", True, True), ("C", True, True)]:
-        scheduler = Scheduler(
-            params=params, locations=locations, contracts=contracts, activities=activities,
-            buffers=buffers, sectors_ordered=sectors_ordered, scenario=sc,
-            allow_eclo=allow_eclo, allow_excess=allow_excess,
-        )
-        assignments, occupancies = scheduler.schedule()
-        results = compute_results(params, contracts, activities, assignments, sc)
-        score = compute_score(results, assignments, sc, activities)
+    for sc in ("A", "B", "C"):
+        sc_dir = EXTERNAL_SOLVER_OUTPUT / f"scenario_{sc}"
+        access_path = sc_dir / "SCHEDULE_ACCESS.csv"
+        results_path = sc_dir / "RESULTS.csv"
+        report_path = sc_dir / "report.json"
+        if not (access_path.exists() and results_path.exists() and report_path.exists()):
+            lines.append(f"\n=== SCENARIO {sc}: no external solver output found at {sc_dir} ===")
+            continue
+
+        with open(report_path, encoding="utf-8") as f:
+            report = jsonlib.load(f)
 
         weeks_by_activity: dict = {}
         eclo_by_activity: dict = {}
-        for a in assignments:
-            weeks_by_activity.setdefault(a.activity_id, set()).add(a.week)
-            if a.eclo:
-                eclo_by_activity.setdefault(a.activity_id, set()).add(a.week)
+        with open(access_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                aid = row["activity_id"]
+                weeks_by_activity.setdefault(aid, set()).add(int(row["week"]))
+                if row["eclo"] in ("1", "True", "true"):
+                    eclo_by_activity.setdefault(aid, set()).add(int(row["week"]))
 
-        lines.append(f"\n=== SCENARIO {sc} (score {round(score, 1)}, {len(assignments)} access-nights scheduled) ===")
+        with open(results_path, encoding="utf-8", newline="") as f:
+            results = list(csv.DictReader(f))
+
+        soft = report.get("soft_scores", {})
+        lines.append(
+            f"\n=== SCENARIO {sc} (feasible={report.get('feasible')}, "
+            f"objective_score={report.get('objective_score')}, "
+            f"nights_scheduled={report.get('detail', {}).get('nights_scheduled')}, "
+            f"eclo_nights_total={soft.get('eclo_nights_total')}, "
+            f"excess_access_nights_total={soft.get('excess_access_nights_total')}) ==="
+        )
         lines.append("Contract completion:")
         for r in results:
             lines.append(f"  {r['contract_number']}: completes {r['simulated_completion_date']}, overrun {r['overrun_days']} days")
