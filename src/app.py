@@ -9,9 +9,11 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from pydantic import BaseModel
 
 from loader import DataLoader
 from scheduler import Scheduler
@@ -32,6 +34,8 @@ app.add_middleware(
 
 BASE_DIR = Path(__file__).parent.parent
 DEFAULT_DATA = BASE_DIR.parent / "NebulaX-Hackathon-ProblemStatement" / "PS1" / "01_data"
+
+load_dotenv(BASE_DIR / ".env")
 
 RISK_BY_PRIORITY = {1: "HIGH", 2: "AMBER", 3: "LOW"}
 
@@ -328,6 +332,109 @@ async def schedule(scenario: str = "C"):
         "locations": locations_out,
         "occupancy": occupancy_out,
     }
+
+
+def _build_schedule_context() -> str:
+    """
+    Plain-text summary of the real scheduler output across all 3 scenarios --
+    this is the ONLY source of truth handed to the chatbot. Nothing here is
+    invented; it's built the same way /api/dashboard and /api/schedule are.
+    """
+    loader = DataLoader(str(DEFAULT_DATA))
+    params, locations, contracts, activities, buffers, sectors_ordered = loader.load()
+
+    lines = [f"Planning horizon: {params.horizon_weeks} weeks, starting {params.horizon_start.isoformat()}.", ""]
+
+    lines.append("CONTRACTS:")
+    for c in contracts.values():
+        lines.append(
+            f"- {c.contract_number}: {c.description} | priority P{c.contract_priority} | "
+            f"{c.nature_of_activity} | planned completion {c.planned_completion_date.isoformat()}"
+        )
+
+    for sc, allow_eclo, allow_excess in [("A", False, False), ("B", True, True), ("C", True, True)]:
+        scheduler = Scheduler(
+            params=params, locations=locations, contracts=contracts, activities=activities,
+            buffers=buffers, sectors_ordered=sectors_ordered, scenario=sc,
+            allow_eclo=allow_eclo, allow_excess=allow_excess,
+        )
+        assignments, occupancies = scheduler.schedule()
+        results = compute_results(params, contracts, activities, assignments, sc)
+        score = compute_score(results, assignments, sc, activities)
+
+        weeks_by_activity: dict = {}
+        eclo_by_activity: dict = {}
+        for a in assignments:
+            weeks_by_activity.setdefault(a.activity_id, set()).add(a.week)
+            if a.eclo:
+                eclo_by_activity.setdefault(a.activity_id, set()).add(a.week)
+
+        lines.append(f"\n=== SCENARIO {sc} (score {round(score, 1)}, {len(assignments)} access-nights scheduled) ===")
+        lines.append("Contract completion:")
+        for r in results:
+            lines.append(f"  {r['contract_number']}: completes {r['simulated_completion_date']}, overrun {r['overrun_days']} days")
+
+        lines.append("Activities:")
+        for act in activities.values():
+            wks = sorted(weeks_by_activity.get(act.activity_id, []))
+            eclo = sorted(eclo_by_activity.get(act.activity_id, []))
+            lines.append(
+                f"  {act.activity_id} (contract {act.contract_number}, type {act.activity_type}, "
+                f"priority P{act.activity_priority}): {act.start_location_id} -> {act.end_location_id}, "
+                f"needs {act.total_accesses} nights, scheduled weeks {wks}"
+                + (f", ECLO weeks {eclo}" if eclo else "")
+            )
+
+    return "\n".join(lines)
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "model"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[ChatMessage] = []
+
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return JSONResponse(status_code=500, content={"error": "GEMINI_API_KEY is not set on the server."})
+
+    from google import genai
+    from google.genai import types
+
+    context = _build_schedule_context()
+    system_instruction = (
+        "You are a planning assistant for LTA's PS1 railway track access scheduler, used by a works "
+        "controller. Answer questions using ONLY the real schedule data below -- never invent activity "
+        "IDs, contract numbers, weeks, or scores that aren't in it. If the data doesn't answer the "
+        "question, say so plainly. Be concise and cite exact IDs/weeks/numbers from the data. "
+        "Reply in PLAIN TEXT ONLY -- no Markdown (no **, no #, no backticks). For lists, use a plain "
+        "dash and a line break, nothing else.\n\n"
+        f"{context}"
+    )
+
+    contents = [
+        types.Content(role=("model" if m.role == "model" else "user"), parts=[types.Part(text=m.content)])
+        for m in req.history
+    ]
+    contents.append(types.Content(role="user", parts=[types.Part(text=req.message)]))
+
+    client = genai.Client(api_key=api_key)
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=system_instruction),
+        )
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"Gemini request failed: {e}"})
+
+    return {"reply": response.text}
 
 
 if __name__ == "__main__":
